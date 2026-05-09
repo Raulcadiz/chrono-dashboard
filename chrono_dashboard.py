@@ -933,6 +933,11 @@ def export_to_markdown_str(report: AlertReport) -> str:
 # PDF export (fpdf2 — pure Python, no external binaries)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _pdf_safe(text: str) -> str:
+    """Encode to Latin-1 (Helvetica range), replacing unsupported chars."""
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
 def export_to_pdf(report: AlertReport, metric: Metric, events: list[Event]) -> bytes:
     try:
         from fpdf import FPDF
@@ -943,20 +948,24 @@ def export_to_pdf(report: AlertReport, metric: Metric, events: list[Event]) -> b
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, "Chrono Dashboard — Informe de resultados", ln=True)
+    pdf.cell(0, 10, _pdf_safe("Chrono Dashboard - Informe de resultados"), ln=True)
 
     pdf.set_font("Helvetica", "", 9)
-    pdf.cell(0, 6, f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  "
-             f"Métrica: {metric.name}  |  Eventos: {len(events)}", ln=True)
-    pdf.cell(0, 6, f"Alerta: {report.level.upper()}  |  "
-             f"Señales activas: {report.active_signals}/{report.total_signals}", ln=True)
+    pdf.cell(0, 6, _pdf_safe(
+        f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  "
+        f"Metrica: {metric.name}  |  Eventos: {len(events)}"
+    ), ln=True)
+    pdf.cell(0, 6, _pdf_safe(
+        f"Alerta: {report.level.upper()}  |  "
+        f"Senales activas: {report.active_signals}/{report.total_signals}"
+    ), ln=True)
     pdf.ln(4)
 
     # Results table
     pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 7, "Resultados estadísticos", ln=True)
+    pdf.cell(0, 7, "Resultados estadisticos", ln=True)
     pdf.set_font("Helvetica", "B", 8)
-    cols = ["Métrica", "p-valor", "Efecto", "Consistencia", "Señal", "Sig."]
+    cols = ["Metrica", "p-valor", "Efecto", "Consistencia", "Senal", "Sig."]
     widths = [55, 22, 22, 28, 28, 15]
     for c, w in zip(cols, widths):
         pdf.cell(w, 6, c, border=1)
@@ -968,7 +977,7 @@ def export_to_pdf(report: AlertReport, metric: Metric, events: list[Event]) -> b
         row = [r.metric_name[:28], f"{p:.4f}", f"{r.effect_size:+.3f}",
                f"{r.consistency:.0%}", r.signal_strength, "SI" if r.significant else "NO"]
         for val, w in zip(row, widths):
-            pdf.cell(w, 6, str(val), border=1)
+            pdf.cell(w, 6, _pdf_safe(str(val)), border=1)
         pdf.ln()
 
     # Narratives
@@ -979,7 +988,7 @@ def export_to_pdf(report: AlertReport, metric: Metric, events: list[Event]) -> b
         pdf.cell(0, 7, "Narrativa IA", ln=True)
         pdf.set_font("Helvetica", "", 9)
         for name, text in narrated:
-            pdf.multi_cell(0, 5, f"{name}: {text}")
+            pdf.multi_cell(0, 5, _pdf_safe(f"{name}: {text}"))
             pdf.ln(2)
 
     # Events list
@@ -988,7 +997,7 @@ def export_to_pdf(report: AlertReport, metric: Metric, events: list[Event]) -> b
     pdf.cell(0, 7, "Eventos analizados", ln=True)
     pdf.set_font("Helvetica", "", 8)
     for evt in events:
-        pdf.cell(0, 5, f"  {evt.timestamp.strftime('%Y-%m-%d %H:%M')}  —  {evt.label}", ln=True)
+        pdf.cell(0, 5, _pdf_safe(f"  {evt.timestamp.strftime('%Y-%m-%d %H:%M')}  -  {evt.label}"), ln=True)
 
     return bytes(pdf.output())
 

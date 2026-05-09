@@ -1,0 +1,10 @@
+streamlit>=1.32,<1.42
+pandas>=1.5
+plotly>=5.18
+openpyxl>=3.1
+chrono-correlator>=1.2.0
+
+# Optional — install one or more for AI narration:
+# anthropic>=0.20.0
+# groq>=0.4.0
+# ollama>=0.1.0

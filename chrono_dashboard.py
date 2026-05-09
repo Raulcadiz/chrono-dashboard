@@ -445,18 +445,18 @@ def fig_time_series(
         for r in report.results:
             if r.significant:
                 for evt in events:
-                    t1 = evt.timestamp - timedelta(hours=lookback_hours)
-                    t2 = evt.timestamp
+                    t1 = (evt.timestamp - timedelta(hours=lookback_hours)).isoformat()
+                    t2 = evt.timestamp.isoformat()
                     fig.add_vrect(
                         x0=t1, x1=t2,
                         fillcolor="rgba(239,68,68,0.07)",
                         line_width=0,
                     )
 
-    # Event vertical lines
+    # Event vertical lines — pass ISO string, not datetime (plotly sum() bug in Py3.13)
     for evt in events:
         fig.add_vline(
-            x=evt.timestamp,
+            x=evt.timestamp.isoformat(),
             line_width=1.5,
             line_dash="dot",
             line_color="#f97316",

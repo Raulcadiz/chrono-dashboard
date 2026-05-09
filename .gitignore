@@ -11,3 +11,4 @@ build/
 chrono_reports.db
 audit_log.jsonl
 *.tmp
+.claude/

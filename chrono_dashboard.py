@@ -440,29 +440,37 @@ def fig_time_series(
         opacity=0.8,
     ))
 
-    # Pre-event shading for significant results
+    # Pre-event shading — add_vrect broken for non-numeric x in plotly 6.x, use add_shape
     if report:
         for r in report.results:
             if r.significant:
                 for evt in events:
                     t1 = (evt.timestamp - timedelta(hours=lookback_hours)).isoformat()
                     t2 = evt.timestamp.isoformat()
-                    fig.add_vrect(
-                        x0=t1, x1=t2,
+                    fig.add_shape(
+                        type="rect",
+                        x0=t1, x1=t2, y0=0, y1=1,
+                        xref="x", yref="paper",
                         fillcolor="rgba(239,68,68,0.07)",
                         line_width=0,
                     )
 
-    # Event vertical lines — pass ISO string, not datetime (plotly sum() bug in Py3.13)
+    # Event vertical lines — add_vline broken for non-numeric x in plotly 6.x, use add_shape + add_annotation
     for evt in events:
-        fig.add_vline(
-            x=evt.timestamp.isoformat(),
-            line_width=1.5,
-            line_dash="dot",
-            line_color="#f97316",
-            annotation_text=evt.label[:16],
-            annotation_position="top",
-            annotation_font_size=9,
+        xs = evt.timestamp.isoformat()
+        fig.add_shape(
+            type="line",
+            x0=xs, x1=xs, y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(color="#f97316", width=1.5, dash="dot"),
+        )
+        fig.add_annotation(
+            x=xs, y=1, yref="paper",
+            text=evt.label[:16],
+            showarrow=False,
+            font=dict(size=9, color="#f97316"),
+            xanchor="left", yanchor="bottom",
+            bgcolor="rgba(255,255,255,0.7)",
         )
 
     fig.update_layout(

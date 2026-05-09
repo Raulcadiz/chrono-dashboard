@@ -2,7 +2,7 @@ streamlit>=1.32,<1.42
 pandas>=1.5
 plotly>=5.18
 openpyxl>=3.1
-chrono-correlator>=1.2.0
+chrono-correlator>=1.3.0
 fpdf2>=2.7
 yfinance>=0.2
 

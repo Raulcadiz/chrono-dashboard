@@ -251,31 +251,136 @@ def load_preset_data(domain_key: str) -> tuple[Metric, list[Event]]:
         raise ValueError("El dominio 'Personalizado' no tiene datos de ejemplo.")
 
     start = datetime(2024, 1, 1)
-    lookback = cfg["lookback_hours"]
-    min_gap = max(3, lookback // 48)
+    lookback   = cfg["lookback_hours"]
+    baseline_d = cfg["baseline_days"]
+    min_gap    = max(3, lookback // 48)
 
+    # Metric spans the full window so baseline has enough history
+    total_days = gen["days"]
     metric = generate_metric(
         name=cfg["metric_name"],
         start=start,
-        days=gen["days"],
+        days=total_days,
         base_value=gen["base_value"],
         noise_std=gen["noise_std"],
         circadian_amplitude=gen.get("circadian_amplitude", 6.0),
         seed=42,
     )
+
+    # Events start AFTER baseline_days so every event has full history to compare against
+    event_start = start + timedelta(days=baseline_d + 2)
+    event_days  = total_days - baseline_d - 4  # leave buffer at end too
     events = generate_events(
-        start=start,
-        days=gen["days"],
+        start=event_start,
+        days=max(event_days, cfg["n_events"] * min_gap + 5),
         n_events=cfg["n_events"],
         min_gap_days=min_gap,
         label=cfg["event_label"],
         seed=42,
     )
 
+    # Stronger pattern (0.55) so the demo clearly shows a signal
     if cfg["pattern_dir"] == "decrease":
-        metric = inject_pattern(metric, events, lookback_hours=lookback, drop_fraction=0.30)
+        metric = inject_pattern(metric, events, lookback_hours=lookback, drop_fraction=0.55)
     else:
-        metric = _boost_pattern(metric, events, lookback_hours=lookback, boost_fraction=0.30)
+        metric = _boost_pattern(metric, events, lookback_hours=lookback, boost_fraction=0.55)
+
+    return metric, events
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Live data — official / public APIs
+# ──────────────────────────────────────────────────────────────────────────────
+
+LIVE_DOMAINS = {
+    "Finanzas y Trading": "finance",
+    "Energía y Medio Ambiente": "ree",
+}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_finance_data(ticker: str = "^IBEX", period: str = "6mo") -> tuple[Metric, list[Event]]:
+    try:
+        import yfinance as yf
+    except ImportError:
+        raise ImportError("Instala yfinance: pip install yfinance")
+
+    tk  = yf.Ticker(ticker)
+    hist = tk.history(period=period, interval="1d")
+    if hist.empty:
+        raise ValueError(f"Sin datos para '{ticker}'. Prueba AAPL, MSFT, ^IBEX, AMZN…")
+
+    hist.index = hist.index.tz_localize(None) if hist.index.tz else hist.index
+    metric = Metric(
+        name=f"Precio cierre — {ticker}",
+        timestamps=[ts.to_pydatetime() for ts in hist.index],
+        values=hist["Close"].tolist(),
+    )
+
+    # Earnings / calendar events
+    events: list[Event] = []
+    try:
+        cal = tk.calendar
+        if cal is not None and not cal.empty:
+            for col in cal.columns:
+                try:
+                    dt = pd.to_datetime(cal[col].iloc[0])
+                    if pd.notna(dt):
+                        events.append(Event(timestamp=dt.to_pydatetime(), label=str(col)))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Fallback: use quarterly earnings from history splits/dividends as proxy events
+    if not events:
+        try:
+            earn = tk.earnings_dates
+            if earn is not None and not earn.empty:
+                earn.index = earn.index.tz_localize(None) if earn.index.tz else earn.index
+                for dt in earn.index[:8]:
+                    if hist.index[0] <= dt <= hist.index[-1]:
+                        events.append(Event(timestamp=dt.to_pydatetime(), label="Earnings"))
+        except Exception:
+            pass
+
+    return metric, events
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_ree_data(days_back: int = 60) -> tuple[Metric, list[Event]]:
+    import urllib.request, json as _json
+    from datetime import timezone
+
+    end   = datetime.now()
+    start = end - timedelta(days=days_back)
+    url   = (
+        "https://apidatos.ree.es/en/datos/demanda/demanda-real"
+        f"?time_trunc=hour"
+        f"&start_date={start.strftime('%Y-%m-%dT00:00')}"
+        f"&end_date={end.strftime('%Y-%m-%dT23:59')}"
+        f"&geo_trunc=electric_system&geo_limit=peninsular&geo_ids=8741"
+    )
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        data = _json.loads(r.read())
+
+    values_raw = data["included"][0]["attributes"]["values"]
+    timestamps, values = [], []
+    for row in values_raw:
+        dt = datetime.fromisoformat(row["datetime"].replace("Z", "+00:00"))
+        dt = dt.replace(tzinfo=None)
+        timestamps.append(dt)
+        values.append(float(row["value"]))
+
+    metric = Metric(name="Demanda eléctrica peninsular (MWh)", timestamps=timestamps, values=values)
+
+    # Mark weekends and public holidays as "events" for demo
+    events = [
+        Event(timestamp=ts, label="Fin de semana")
+        for ts in timestamps[::24]
+        if ts.weekday() == 5  # Saturdays only
+    ][:10]
 
     return metric, events
 
@@ -607,15 +712,39 @@ def build_template_narrative(report: AlertReport, domain_cfg: dict, tone: str) -
     significant = [r for r in report.results if r.significant]
 
     if not significant:
+        # Still show the best available result so users understand what they're seeing
+        best = max(report.results, key=lambda r: r.association_strength) if report.results else None
         if es:
             lines.append(
-                "No se encontraron asociaciones estadísticamente significativas con los parámetros actuales. "
-                "Prueba a ajustar la ventana pre-evento, los días de baseline o la dirección de hipótesis."
+                "No se encontraron asociaciones **estadísticamente significativas** con los parámetros actuales. "
+                "Esto puede significar que realmente no hay patrón, o que los parámetros necesitan ajuste."
+            )
+            if best:
+                lines.append(
+                    f"El mejor resultado obtenido fue para **{best.metric_name}**: "
+                    f"p-valor = `{best.p_value:.4f}` · efecto = `{best.effect_size:+.3f}` · "
+                    f"consistencia = `{best.consistency:.0%}` · señal = *{best.signal_strength}*."
+                )
+            lines.append(
+                "**Sugerencias:** amplía la ventana pre-evento · reduce los días de baseline · "
+                "cambia la dirección de hipótesis · sube más eventos · revisa que los eventos "
+                "ocurran después del período de baseline."
             )
         else:
             lines.append(
-                "No statistically significant associations were found with the current parameters. "
-                "Try adjusting the pre-event window, baseline days, or hypothesis direction."
+                "No **statistically significant** associations were found with the current parameters. "
+                "This may mean there is no pattern, or the parameters need adjustment."
+            )
+            if best:
+                lines.append(
+                    f"Best result for **{best.metric_name}**: "
+                    f"p-value = `{best.p_value:.4f}` · effect = `{best.effect_size:+.3f}` · "
+                    f"consistency = `{best.consistency:.0%}` · signal = *{best.signal_strength}*."
+                )
+            lines.append(
+                "**Suggestions:** widen the pre-event window · reduce baseline days · "
+                "change hypothesis direction · add more events · ensure events occur "
+                "after the baseline period."
             )
         return "\n\n".join(lines)
 
@@ -801,6 +930,70 @@ def export_to_markdown_str(report: AlertReport) -> str:
     return content
 
 # ──────────────────────────────────────────────────────────────────────────────
+# PDF export (fpdf2 — pure Python, no external binaries)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def export_to_pdf(report: AlertReport, metric: Metric, events: list[Event]) -> bytes:
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        raise ImportError("Instala fpdf2: pip install fpdf2")
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "Chrono Dashboard — Informe de resultados", ln=True)
+
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(0, 6, f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  "
+             f"Métrica: {metric.name}  |  Eventos: {len(events)}", ln=True)
+    pdf.cell(0, 6, f"Alerta: {report.level.upper()}  |  "
+             f"Señales activas: {report.active_signals}/{report.total_signals}", ln=True)
+    pdf.ln(4)
+
+    # Results table
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, "Resultados estadísticos", ln=True)
+    pdf.set_font("Helvetica", "B", 8)
+    cols = ["Métrica", "p-valor", "Efecto", "Consistencia", "Señal", "Sig."]
+    widths = [55, 22, 22, 28, 28, 15]
+    for c, w in zip(cols, widths):
+        pdf.cell(w, 6, c, border=1)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "", 8)
+    for r in report.results:
+        p = r.adjusted_p_value if r.adjusted_p_value is not None else r.p_value
+        row = [r.metric_name[:28], f"{p:.4f}", f"{r.effect_size:+.3f}",
+               f"{r.consistency:.0%}", r.signal_strength, "SI" if r.significant else "NO"]
+        for val, w in zip(row, widths):
+            pdf.cell(w, 6, str(val), border=1)
+        pdf.ln()
+
+    # Narratives
+    narrated = [(r.metric_name, r.narrative) for r in report.results if r.narrative]
+    if narrated:
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 7, "Narrativa IA", ln=True)
+        pdf.set_font("Helvetica", "", 9)
+        for name, text in narrated:
+            pdf.multi_cell(0, 5, f"{name}: {text}")
+            pdf.ln(2)
+
+    # Events list
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, "Eventos analizados", ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    for evt in events:
+        pdf.cell(0, 5, f"  {evt.timestamp.strftime('%Y-%m-%d %H:%M')}  —  {evt.label}", ln=True)
+
+    return bytes(pdf.output())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Tab renderers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -899,6 +1092,25 @@ def render_tab_results(
     config: SignificanceConfig,
 ) -> None:
     st.markdown("#### Tabla de resultados estadísticos")
+
+    with st.expander("📖 ¿Qué significa cada columna?"):
+        st.markdown("""
+| Columna | Qué mide | Cómo interpretarlo |
+|---|---|---|
+| **p-valor** | Probabilidad de que el patrón sea azar | < 0.05 → estadísticamente significativo |
+| **p-valor adj.** | p-valor corregido por múltiples comparaciones (FDR/Bonferroni) | Más conservador que el original |
+| **Efecto** | Rank-biserial: dirección e intensidad del patrón | +1 = siempre sube · -1 = siempre baja · 0 = sin patrón |
+| **IC 95%** | Intervalo de confianza del efecto (si Bootstrap activado) | Cuanto más estrecho, más preciso |
+| **Consistencia** | % de eventos que individualmente muestran el patrón | 80% = en 8 de cada 10 eventos ocurre lo mismo |
+| **Señal** | Clasificación compuesta: Strong / Moderate / Weak / None | Requiere efecto > umbral Y consistencia > umbral |
+| **Asociación** | Puntuación 0–1: `0.5×efecto + 0.5×consistencia` | Resumen único de la fuerza del patrón |
+| **✓ Sig.** | ¿Cumple todos los criterios simultáneamente? | ✅ = p < α Y señal fuerte/moderada |
+| **Baseline (med.)** | Valor típico en el período de referencia | Lo que ocurre normalmente |
+| **Pre-evento (med.)** | Valor típico justo antes de los eventos | Lo que cambia antes del evento |
+
+> **Importante:** una asociación estadística no implica causalidad. El análisis detecta *patrones temporales*, no causas.
+""")
+
     df_res = build_results_df(report)
 
     def _color_sig(val: str) -> str:
@@ -1063,6 +1275,20 @@ def render_tab_export(
             use_container_width=True,
         )
 
+    # PDF — row 2
+    st.markdown("#### Informe completo en PDF")
+    try:
+        pdf_bytes = export_to_pdf(report, metric, events)
+        st.download_button(
+            label="⬇️ Descargar PDF",
+            data=pdf_bytes,
+            file_name="chrono_report.pdf",
+            mime="application/pdf",
+            use_container_width=False,
+        )
+    except ImportError:
+        st.info("Para PDF instala fpdf2 en el servidor: `pip install fpdf2`")
+
     st.divider()
 
     # CSV de datos de la métrica
@@ -1111,12 +1337,27 @@ def render_sidebar() -> dict:
     st.sidebar.markdown("---")
 
     # Data mode
+    live_available = domain_key in LIVE_DOMAINS
     if domain_key == "Personalizado":
         mode = "upload"
     else:
-        mode_opts = ["📊 Datos de ejemplo", "📂 Subir mis datos"]
+        live_label = "🌐 Datos en vivo" if live_available else None
+        mode_opts = ["📊 Datos de ejemplo"] + ([live_label] if live_label else []) + ["📂 Subir mis datos"]
         mode_sel  = st.sidebar.radio("Modo de datos", mode_opts)
-        mode = "preset" if "ejemplo" in mode_sel else "upload"
+        if "ejemplo" in mode_sel:
+            mode = "preset"
+        elif "vivo" in mode_sel:
+            mode = "live"
+        else:
+            mode = "upload"
+
+    # Live data extra options
+    live_ticker = "^IBEX"
+    if mode == "live" and domain_key == "Finanzas y Trading":
+        live_ticker = st.sidebar.text_input(
+            "Ticker (Yahoo Finance)", value="^IBEX",
+            help="Ej: AAPL, MSFT, ^IBEX, AMZN, BTC-EUR"
+        )
 
     # File uploader (only in upload mode)
     uploaded_file = None
@@ -1196,6 +1437,7 @@ def render_sidebar() -> dict:
         strong_effect=strong_effect,
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
+        live_ticker=live_ticker,
         run_btn=run_btn,
     )
 
@@ -1236,6 +1478,7 @@ def main() -> None:
     strong_effect    = opts["strong_effect"]
     llm_provider     = opts["llm_provider"]
     llm_api_key      = opts["llm_api_key"]
+    live_ticker      = opts.get("live_ticker", "^IBEX")
     run_btn          = opts["run_btn"]
 
     # Invalidate cached results when domain or mode changes
@@ -1262,6 +1505,28 @@ def main() -> None:
             )
         except Exception as exc:
             data_error = str(exc)
+
+    elif mode == "live":
+        try:
+            with st.spinner("Descargando datos en vivo..."):
+                if domain_key == "Finanzas y Trading":
+                    metric, events = fetch_finance_data(ticker=live_ticker)
+                elif domain_key == "Energía y Medio Ambiente":
+                    metric, events = fetch_ree_data()
+                else:
+                    raise ValueError(f"Datos en vivo no disponibles para '{domain_key}'")
+            st.success(
+                f"Datos en vivo: **{len(metric.timestamps):,} puntos** · "
+                f"**{len(events)} eventos** · "
+                f"{metric.timestamps[0].strftime('%Y-%m-%d')} → "
+                f"{metric.timestamps[-1].strftime('%Y-%m-%d')}"
+            )
+            if not events:
+                st.warning("No se encontraron eventos automáticos. Prueba a subir tus propios eventos o usa los datos de ejemplo.")
+        except ImportError as exc:
+            data_error = str(exc)
+        except Exception as exc:
+            data_error = f"Error descargando datos en vivo: {exc}"
 
     else:  # upload mode
         uploaded_file = opts["uploaded_file"]

@@ -3,6 +3,8 @@ pandas>=1.5
 plotly>=5.18
 openpyxl>=3.1
 chrono-correlator>=1.2.0
+fpdf2>=2.7
+yfinance>=0.2
 
 # Optional — install one or more for AI narration:
 # anthropic>=0.20.0
